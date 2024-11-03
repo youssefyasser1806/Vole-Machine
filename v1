@@ -1,0 +1,342 @@
+#include <iostream>
+#include <string>
+#include <vector>
+#include <iomanip>
+#include <fstream>
+#include <limits>
+using namespace std;
+
+// Quick forward declarations
+class CPU;
+class Memory;
+class MainMemory;
+class Registers;
+
+// Base instruction class
+class Instruction {
+protected:
+    CPU* cpu;
+    Memory* mem;
+    Registers* regs;
+
+public:
+    Instruction(CPU* c, Memory* m, Registers* r) : cpu(c), mem(m), regs(r) {}
+    virtual void execute(uint16_t instr) = 0;  // pure virtual
+    virtual ~Instruction() = default;
+};
+
+// Memory management
+class Memory {
+protected:
+    vector<uint8_t> mem;  // internal storage
+
+public:
+    Memory(size_t size) : mem(size, 0) {}  // initialize with zeros
+
+    virtual void store(uint8_t addr, uint8_t val) {
+        if (addr < mem.size())
+            mem[addr] = val;
+    }
+
+    virtual uint8_t read(uint8_t addr) const {
+        return addr < mem.size() ? mem[addr] : 0;
+    }
+
+    size_t size() const { return mem.size(); }
+    const vector<uint8_t>& getData() const { return mem; }
+};
+
+// Specific memory types
+class MainMemory : public Memory {
+public:
+    MainMemory() : Memory(256) {}  // 256 bytes
+};
+
+class Registers : public Memory {
+public:
+    Registers() : Memory(16) {}    // 16 registers
+};
+
+// Individual instruction implementations
+class LoadFromRAM : public Instruction {
+public:
+    LoadFromRAM(CPU* c, Memory* m, Registers* r) : Instruction(c, m, r) {}
+    void execute(uint16_t instr) override {
+        uint8_t reg = (instr >> 8) & 0xF;
+        uint8_t addr = instr & 0xFF;
+        regs->store(reg, mem->read(addr));
+    }
+};
+
+class LoadImmediate : public Instruction {
+public:
+    LoadImmediate(CPU* c, Memory* m, Registers* r) : Instruction(c, m, r) {}
+    void execute(uint16_t instr) override {
+        uint8_t reg = (instr >> 8) & 0xF;
+        uint8_t val = instr & 0xFF;
+        regs->store(reg, val);
+    }
+};
+
+class StoreToRAM : public Instruction {
+public:
+    StoreToRAM(CPU* c, Memory* m, Registers* r) : Instruction(c, m, r) {}
+    void execute(uint16_t instr) override {
+        uint8_t reg = (instr >> 8) & 0xF;
+        uint8_t addr = instr & 0xFF;
+        mem->store(addr, regs->read(reg));
+    }
+};
+
+class CopyReg : public Instruction {
+public:
+    CopyReg(CPU* c, Memory* m, Registers* r) : Instruction(c, m, r) {}
+    void execute(uint16_t instr) override {
+        uint8_t dst = (instr >> 8) & 0xF;
+        uint8_t src = instr & 0xF;
+        regs->store(dst, regs->read(src));
+    }
+};
+
+class Add : public Instruction {
+public:
+    Add(CPU* c, Memory* m, Registers* r) : Instruction(c, m, r) {}
+    void execute(uint16_t instr) override {
+        uint8_t dst = (instr >> 8) & 0xF;
+        uint8_t r1 = (instr >> 4) & 0xF;
+        uint8_t r2 = instr & 0xF;
+
+        // Treat as signed 8-bit integers
+        int8_t v1 = static_cast<int8_t>(regs->read(r1));
+        int8_t v2 = static_cast<int8_t>(regs->read(r2));
+        regs->store(dst, v1 + v2);
+    }
+};
+
+class AddFloat : public Instruction {
+public:
+    AddFloat(CPU* c, Memory* m, Registers* r) : Instruction(c, m, r) {}
+    void execute(uint16_t instr) override {
+        uint8_t dst = (instr >> 8) & 0xF;
+        uint8_t r1 = (instr >> 4) & 0xF;
+        uint8_t r2 = instr & 0xF;
+
+        // Simple fixed-point math (4.4 format)
+        float v1 = static_cast<float>(regs->read(r1)) / 16.0f;
+        float v2 = static_cast<float>(regs->read(r2)) / 16.0f;
+        regs->store(dst, static_cast<uint8_t>((v1 + v2) * 16.0f));
+    }
+};
+
+// Bitwise operations
+class OR : public Instruction {
+public:
+    OR(CPU* c, Memory* m, Registers* r) : Instruction(c, m, r) {}
+    void execute(uint16_t instr) override {
+        uint8_t dst = (instr >> 8) & 0xF;
+        uint8_t r1 = (instr >> 4) & 0xF;
+        uint8_t r2 = instr & 0xF;
+        regs->store(dst, regs->read(r1) | regs->read(r2));
+    }
+};
+
+class AND : public Instruction {
+public:
+    AND(CPU* c, Memory* m, Registers* r) : Instruction(c, m, r) {}
+    void execute(uint16_t instr) override {
+        uint8_t dst = (instr >> 8) & 0xF;
+        uint8_t r1 = (instr >> 4) & 0xF;
+        uint8_t r2 = instr & 0xF;
+        regs->store(dst, regs->read(r1) & regs->read(r2));
+    }
+};
+
+class XOR : public Instruction {
+public:
+    XOR(CPU* c, Memory* m, Registers* r) : Instruction(c, m, r) {}
+    void execute(uint16_t instr) override {
+        uint8_t dst = (instr >> 8) & 0xF;
+        uint8_t r1 = (instr >> 4) & 0xF;
+        uint8_t r2 = instr & 0xF;
+        regs->store(dst, regs->read(r1) ^ regs->read(r2));
+    }
+};
+
+class ROR : public Instruction {  // Rotate Right
+public:
+    ROR(CPU* c, Memory* m, Registers* r) : Instruction(c, m, r) {}
+    void execute(uint16_t instr) override {
+        uint8_t reg = (instr >> 8) & 0xF;
+        uint8_t steps = instr & 0xF;
+        uint8_t val = regs->read(reg);
+        regs->store(reg, (val >> steps) | (val << (8 - steps)));
+    }
+};
+
+// Control flow instructions
+class JEQ : public Instruction {  // Jump if Equal
+public:
+    JEQ(CPU* c, Memory* m, Registers* r) : Instruction(c, m, r) {}
+    void execute(uint16_t instr) override {
+        uint8_t reg = (instr >> 8) & 0xF;
+        uint8_t val = instr & 0xFF;
+        if (regs->read(reg) == val) {
+            // implement jump logic when needed
+        }
+    }
+};
+
+class HALT : public Instruction {
+public:
+    HALT(CPU* c, Memory* m, Registers* r) : Instruction(c, m, r) {}
+    void execute(uint16_t) override {} //stops execution
+};
+
+class JGT : public Instruction {  // Jump if Greater Than
+public:
+    JGT(CPU* c, Memory* m, Registers* r) : Instruction(c, m, r) {}
+    void execute(uint16_t instr) override {
+        uint8_t reg = (instr >> 8) & 0xF;
+        uint8_t val = instr & 0xFF;
+        if (static_cast<int8_t>(regs->read(reg)) > static_cast<int8_t>(val)) {
+
+        }
+    }
+};
+
+// Main CPU implementation
+class CPU {
+private:
+    uint8_t pc;
+    uint16_t ir;
+    MainMemory* ram;
+    Registers* regs;
+    vector<Instruction*> ops;  // operation lookup table
+
+public:
+    CPU(MainMemory* mm, Registers* r) : pc(0), ir(0), ram(mm), regs(r) {
+        // Setup instruction table
+        ops.resize(16, nullptr);
+        ops[1] = new LoadFromRAM(this, ram, regs);
+        ops[2] = new LoadImmediate(this, ram, regs);
+        ops[3] = new StoreToRAM(this, ram, regs);
+        ops[4] = new CopyReg(this, ram, regs);
+        ops[5] = new Add(this, ram, regs);
+        ops[6] = new AddFloat(this, ram, regs);
+        ops[7] = new OR(this, ram, regs);
+        ops[8] = new AND(this, ram, regs);
+        ops[9] = new XOR(this, ram, regs);
+        ops[10] = new ROR(this, ram, regs);
+        ops[11] = new JEQ(this, ram, regs);
+        ops[12] = new HALT(this, ram, regs);
+        ops[13] = new JGT(this, ram, regs);
+    }
+
+    // Execute a single instruction from hex string
+    void execute(const string& hex_instr) {
+        ir = stoul(hex_instr, nullptr, 16);
+        uint8_t opcode = (ir >> 12) & 0xF;
+
+        if (opcode > 0 && opcode < ops.size() && ops[opcode]) {
+            ops[opcode]->execute(ir);
+        }
+    }
+
+    // Debug output
+    void dump_state() const {
+
+        cout << "\nMemory:\n";
+        for (size_t i = 0; i < ram->size(); i++) {
+            if (i % 16 == 0)
+                cout << "\n" << hex << uppercase << setw(2) << setfill('0') << i << ": ";
+            cout << setw(2) << setfill('0') << static_cast<int>(ram->read(i)) << " ";
+        }
+
+        // Register dump
+        cout << "\n\nRegisters:\n";
+        for (size_t i = 0; i < regs->size(); i++) {
+            cout << "R" << hex << uppercase << i << ": "
+                 << setw(2) << setfill('0') << static_cast<int>(regs->read(i)) << " ";
+        }
+        cout << dec << endl;
+    }
+
+    ~CPU() {
+        for (auto* op : ops) delete op;
+    }
+};
+
+// Helper function to validate hex instructions
+bool valid_hex_instruction(const string& input) {
+    return input.size() == 4 && (input.begin(), input.end(), ::isxdigit);
+}
+
+
+
+int main() {
+    // Initialize system
+    MainMemory ram;
+    Registers regs;
+    CPU cpu(&ram, &regs);
+
+    // Get valid input file
+    string filename;
+    ifstream infile;
+
+    do {
+        cout << "Input file (e.g. program.txt): ";
+        getline(cin, filename);
+
+        infile.open(filename);
+        if (!infile) {
+            cerr << "Couldn't open " << filename << ". Please try again.\n";
+            infile.clear(); // Clear error flags
+        }
+    } while (!infile);
+
+
+    string line;
+    while (getline(infile, line)) {
+        // Skip empty lines
+        if (line.empty()) {
+            continue;
+        }
+
+        // Keep trying until we get a valid instruction or user wants to skip
+        while (!valid_hex_instruction(line)) {
+            cout << "\nInvalid instruction: " << line;
+            cout << "\nPlease enter a valid 4-digit hex instruction (or 'skip' to skip this line): ";
+            getline(cin, line);
+
+            if (line == "skip") {
+                cout << "Skipping invalid instruction...\n";
+                break;
+            }
+        }
+
+        // Process valid instruction
+        if (valid_hex_instruction(line)) {
+            try {
+                cpu.execute(line);
+                cout << "\nExecuted: " << line << endl;
+                cpu.dump_state();
+            }
+            catch (const exception& e) {
+                cout << "\nError executing " << line << ": " << e.what() << endl;
+                cout << "Would you like to retry this instruction? (y/n): ";
+                string response;
+                getline(cin, response);
+
+                if (response == "y" || response == "Y") {
+                    cout << "Enter new instruction: ";
+                    getline(cin, line);
+                    continue;
+                }
+            }
+        }
+    }
+
+    infile.close();
+    cout << "\nProgram execution completed.\n";
+    return 0;
+}
